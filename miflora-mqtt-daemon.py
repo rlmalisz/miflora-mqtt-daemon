@@ -4,6 +4,7 @@ import ssl
 import sys
 import re
 import json
+import os
 import os.path
 import argparse
 from time import time, sleep, localtime, strftime
@@ -16,6 +17,7 @@ from miflora.miflora_poller import MiFloraPoller, MI_BATTERY, MI_CONDUCTIVITY, M
 from btlewrap import available_backends, BluepyBackend, GatttoolBackend, PygattBackend
 from btlewrap.base import BluetoothBackendException
 import paho.mqtt.client as mqtt
+import paho.mqtt.subscribe as subscribe
 import sdnotify
 
 project_name = 'Xiaomi Mi Flora Plant Sensor MQTT Client/Daemon'
@@ -141,13 +143,31 @@ miflora_cache_timeout = sleep_period - 1
 if reporting_mode not in ['mqtt-json', 'mqtt-homie', 'json', 'mqtt-smarthome', 'homeassistant-mqtt']:
     print_line('Configuration parameter reporting_mode set to an invalid value', error=True, sd_notify=True)
     sys.exit(1)
+
 if not config['Sensors']:
-    print_line('No sensors found in configuration file "config.ini"', error=True, sd_notify=True)
-    sys.exit(1)
+    if config['MQTT_SUB']:
+        print("retrieving sensor list from online broker")
+        sub_host = config['MQTT_SUB'].get('hostname', 'localhost')
+        sub_port = config['MQTT_SUB'].getint('port', 1883)
+        get_sensors_hostname_topic = config['MQTT_SUB'].getboolean('host_base_topic', True)
+        if get_sensors_hostname_topic:
+            sub_topic = os.uname().nodename  + '/' + 'miflora_sensors'
+        else:
+            sub_topic = config['MQTT_SUB'].get('base_topic', None) + '/' + 'miflora_sensors'
+        print("[" + sub_topic + "]")
+        msg = subscribe.simple(sub_topic,hostname=sub_host,port=sub_port)
+        sensors = json.loads(msg.payload.decode('utf-8'))
+    else:
+        print_line('No sensors found in configuration file "config.ini"', error=True, sd_notify=True)
+        sys.exit(1)
+else:
+    sensors = config['Sensors']
 
 print_line('Configuration accepted', console=False, sd_notify=True)
 
-# MQTT connection
+sd_notifier.notify('READY=1')
+
+# MQTT pub connection
 if reporting_mode in ['mqtt-json', 'mqtt-homie', 'mqtt-smarthome', 'homeassistant-mqtt']:
     print_line('Connecting to MQTT broker ...')
     mqtt_client = mqtt.Client()
@@ -178,7 +198,7 @@ if reporting_mode in ['mqtt-json', 'mqtt-homie', 'mqtt-smarthome', 'homeassistan
                             port=config['MQTT'].getint('port', 1883),
                             keepalive=config['MQTT'].getint('keepalive', 60))
     except:
-        print_line('MQTT connection error. Please check your settings in the configuration file "config.ini"', error=True, sd_notify=True)
+        print_line('MQTT pub connection error. Please check your settings in the configuration file "config.ini"', error=True, sd_notify=True)
         sys.exit(1)
     else:
         if reporting_mode == 'mqtt-smarthome':
@@ -186,11 +206,13 @@ if reporting_mode in ['mqtt-json', 'mqtt-homie', 'mqtt-smarthome', 'homeassistan
         mqtt_client.loop_start()
         sleep(1.0) # some slack to establish the connection
 
-sd_notifier.notify('READY=1')
+local_attempts = config['Timely'].getint('local_attempts', 2)
+miflora_retries = config['Timely'].getint('miflora_retries', 3)
+pretest_sensors = config['Timely'].getboolean('pretest_sensors', True)
 
 # Initialize Mi Flora sensors
 flores = OrderedDict()
-for [name, mac] in config['Sensors'].items():
+for [name, mac] in sensors.items():
     if not re.match("C4:7C:8D:[0-9A-F]{2}:[0-9A-F]{2}:[0-9A-F]{2}", mac):
         print_line('The MAC address "{}" seems to be in the wrong format. Please check your configuration'.format(mac), error=True, sd_notify=True)
         sys.exit(1)
@@ -207,7 +229,9 @@ for [name, mac] in config['Sensors'].items():
     print('Name:          "{}"'.format(name_pretty))
     #print_line('Attempting initial connection to Mi Flora sensor "{}" ({})'.format(name_pretty, mac), console=False, sd_notify=True)
 
-    flora_poller = MiFloraPoller(mac=mac, backend=GatttoolBackend, cache_timeout=miflora_cache_timeout, retries=3, adapter=used_adapter)
+    flora_poller = MiFloraPoller(mac=mac, backend=GatttoolBackend,
+                                 cache_timeout=miflora_cache_timeout, retries=miflora_retries,
+                                 adapter=used_adapter)
     flora['poller'] = flora_poller
     flora['name_pretty'] = name_pretty
     flora['mac'] = flora_poller._mac
@@ -215,19 +239,20 @@ for [name, mac] in config['Sensors'].items():
     flora['location_clean'] = location_clean
     flora['location_pretty'] = location_pretty
     flora['stats'] = {"count": 0, "success": 0, "failure": 0}
-    try:
-        flora_poller.fill_cache()
-        flora_poller.parameter_value(MI_LIGHT)
-        flora['firmware'] = flora_poller.firmware_version()
-    except (IOError,BluetoothBackendException):
-        print_line('Initial connection to Mi Flora sensor "{}" ({}) failed.'.format(name_pretty, mac), error=True, sd_notify=True)
-    else:
-        print('Internal name: "{}"'.format(name_clean))
-        print('Device name:   "{}"'.format(flora_poller.name()))
-        print('MAC address:   {}'.format(flora_poller._mac))
-        print('Firmware:      {}'.format(flora_poller.firmware_version()))
-        print_line('Initial connection to Mi Flora sensor "{}" ({}) successful'.format(name_pretty, mac), sd_notify=True)
-    print()
+    if pretest_sensors:
+        try:
+            flora_poller.fill_cache()
+            flora_poller.parameter_value(MI_LIGHT)
+            flora['firmware'] = flora_poller.firmware_version()
+        except (BluetoothBackendException):
+            print_line('Initial connection to Mi Flora sensor "{}" ({}) failed.'.format(name_pretty, mac), error=True, sd_notify=True)
+        else:
+            print('Internal name: "{}"'.format(name_clean))
+            print('Device name:   "{}"'.format(flora_poller.name()))
+            print('MAC address:   {}'.format(flora_poller._mac))
+            print('Firmware:      {}'.format(flora_poller.firmware_version()))
+            print_line('Initial connection to Mi Flora sensor "{}" ({}) successful'.format(name_pretty, mac), sd_notify=True)
+            print()
     flores[name_clean] = flora
 
 # openHAB items generation
@@ -305,7 +330,7 @@ print_line('Initialization complete, starting MQTT publish loop', console=False,
 while True:
     for [flora_name, flora] in flores.items():
         data = dict()
-        attempts = 2
+        attempts = local_attempts
         flora['poller']._cache = None
         flora['poller']._last_read = None
         flora['stats']['count'] = flora['stats']['count'] + 1
@@ -314,7 +339,7 @@ while True:
             try:
                 flora['poller'].fill_cache()
                 flora['poller'].parameter_value(MI_LIGHT)
-            except (IOError,BluetoothBackendException):
+            except (BluetoothBackendException):
                 attempts = attempts - 1
                 if attempts > 0:
                     print_line('Retrying ...', warning = True)

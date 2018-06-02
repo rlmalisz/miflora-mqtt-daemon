@@ -58,7 +58,7 @@ The following example shows the installation under Debian/Raspbian below the `/o
 ```shell
 sudo apt install git python3 python3-pip bluetooth bluez
 
-git clone https://github.com/ThomDietrich/miflora-mqtt-daemon.git /opt/miflora-mqtt-daemon
+git clone https://github.com/rlmalisz/miflora-mqtt-daemon.git /opt/miflora-mqtt-daemon
 
 cd /opt/miflora-mqtt-daemon
 sudo pip3 install -r requirements.txt
@@ -82,7 +82,7 @@ vim /opt/miflora-mqtt-daemon/config.ini
 ```
 
 **Attention:**
-You need to add at least one sensor to the configuration.
+You need to add at least one sensor or a MQTT broker providing sensor info to the configuration.
 Scan for available Mi Flora sensors in your proximity with the command:
 
 ```shell
